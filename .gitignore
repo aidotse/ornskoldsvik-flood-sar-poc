@@ -1,0 +1,23 @@
+# Data
+data/
+*.zip
+*.SAFE/
+
+# Secrets
+.env
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+dist/
+.ruff_cache/
+.pytest_cache/
+
+# Notebooks: checkpoints only; committed notebooks keep outputs deliberately
+.ipynb_checkpoints/
+
+
+.DS_Store
+.container-home/
