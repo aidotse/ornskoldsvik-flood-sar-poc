@@ -1,0 +1,66 @@
+# Örnsköldsvik / Gottne flood AOI (EMSR841 AOI01), Sept 2025.
+# AOI polygon derived from EMS areaOfInterestA (MONIT02 v1), convex hull, EPSG:4326.
+# Nothing below is hardcoded in code — scripts read this file.
+
+#where on the map do we care about?
+aoi:
+  name: ornskoldsvik_gottne
+  ems_activation: EMSR841
+  ems_aoi: AOI01
+  crs: EPSG:4326
+  bbox: [17.8185, 63.2614, 18.7204, 63.5458]  # W, S, E, N
+  polygon_wkt: >-
+    POLYGON ((18.7089 63.2614, 18.5669 63.2863, 17.9041 63.4709, 17.8361 63.4947,
+    17.8332 63.4961, 17.8210 63.5033, 17.8185 63.5048, 17.8188 63.5060,
+    17.9332 63.5398, 17.9650 63.5454, 17.9670 63.5458, 18.1253 63.5122,
+    18.4438 63.4309, 18.4545 63.4278, 18.4808 63.4180, 18.7153 63.2692,
+    18.7204 63.2639, 18.7127 63.2615, 18.7089 63.2614))
+
+event:
+  # Riverine flood, Moälven catchment; peak ~Sept 7-11 2025
+  window_pre: ["2025-08-20", "2025-09-06"]
+  window_during: ["2025-09-06", "2025-09-12"]
+  window_post: ["2025-09-12", "2025-10-05"]
+
+tracks:
+  # The two EMS-label-source tracks are the spine of the POC:
+  # rel 131 ASC (FEP source = S1A Sept 10 16:14) and rel 22 DESC (MONIT02 source = S1A Sept 15 05:06).
+  - relative_orbit: 131
+    pass: ASCENDING
+  - relative_orbit: 22
+    pass: DESCENDING
+
+# Download manifest — full names resolved & verified against CDSE OData 2026-07-16
+# (sizes and MD5 are re-fetched from OData at download time; total core ≈ 33.8 GB).
+
+# pre for 131???
+manifest:
+  - {track: 131, role: during+FEP-label-source, name: S1A_IW_RAW__0SDV_20250910T161414_20250910T161446_060928_0796C3_BE25.SAFE}
+  - {track: 131, role: during+FEP-label-source, name: S1A_IW_GRDH_1SDV_20250910T161417_20250910T161442_060928_0796C3_FC8C.SAFE}
+  - {track: 131, role: during+FEP-label-source, name: S1A_IW_SLC__1SDV_20250910T161417_20250910T161444_060928_0796C3_C17D.SAFE}
+  - {track: 131, role: post-recession, name: S1C_IW_RAW__0SDV_20250916T161323_20250916T161355_004152_0083F2_2667.SAFE}
+  - {track: 131, role: post-recession, name: S1C_IW_GRDH_1SDV_20250916T161326_20250916T161351_004152_0083F2_14C6.SAFE}
+  - {track: 22, role: pre, name: S1A_IW_RAW__0SDV_20250903T050558_20250903T050630_060819_07926C_C7B5.SAFE}
+  - {track: 22, role: pre, name: S1A_IW_GRDH_1SDV_20250903T050602_20250903T050627_060819_07926C_5298.SAFE}
+  - {track: 22, role: post-peak+MONIT02-label-source, name: S1A_IW_RAW__0SDV_20250915T050558_20250915T050631_060994_07996F_694D.SAFE}
+  - {track: 22, role: post-peak+MONIT02-label-source, name: S1A_IW_GRDH_1SDV_20250915T050602_20250915T050627_060994_07996F_5812.SAFE}
+  - {track: 22, role: post-peak+MONIT02-label-source, name: S1A_IW_SLC__1SDV_20250915T050601_20250915T050628_060994_07996F_0088.SAFE}
+  - {track: 22, role: post-recession, name: S1C_IW_RAW__0SDV_20250921T050501_20250921T050534_004218_0085E9_8EEE.SAFE}
+  - {track: 22, role: post-recession, name: S1C_IW_GRDH_1SDV_20250921T050505_20250921T050530_004218_0085E9_8CA0.SAFE}
+
+# Optional extensions (skip for now; add by uncommenting):
+#  - {track: 131, role: pre-deep-baseline, name_prefix: S1C_IW_..._20250823T...}   # ~3.5 GB
+#  - {track: 22,  role: pre-deep-baseline, name_prefix: S1A_IW_..._20250822T...}   # ~3.5 GB
+#  - {track: 22,  role: post-late, name_prefix: S1A_IW_..._20250922T...}           # ~3.5 GB
+
+# EMS products still missing from disk (public HTTP, no auth).
+# AOI02 DEL does NOT exist: dashboard API says "Not produced because of remote
+# sensing limitations" (statusCode N, empty downloadPath) — verified 2026-07-16.
+ems_downloads:
+  - EMSR841_AOI01_FEP_PRODUCT_v1
+  - EMSR841_AOI01_DEL_PRODUCT_v1
+
+download:
+  target_dir: data/copernicus_data/S1
+  ems_dir: data/copernicus_data
+  hard_cap_gb: 50
