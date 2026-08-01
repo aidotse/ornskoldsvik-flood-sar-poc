@@ -8,6 +8,7 @@ import geopandas as gpd
 import numpy as np
 import xarray as xr
 from rasterio import features
+from scipy.ndimage import uniform_filter
 
 
 def to_db(sigma0: xr.DataArray) -> xr.DataArray:
@@ -79,3 +80,26 @@ def iou_f1(pred: xr.DataArray, truth: xr.DataArray, valid: xr.DataArray | None =
 
 def load_ems_layer(path: str | Path) -> gpd.GeoDataFrame:
     return gpd.read_file(path)
+
+def top_hotspot_windows(hit_mask: np.ndarray, window: int = 60, n: int = 3) -> list[tuple[slice, slice]]:
+    """Top-n (y, x) window slices ranked by hit density in hit_mask, centers >= window apart.
+
+    Greedy pick over a local-density map (box filter), so picks land on genuinely
+    different parts of a corridor-shaped extent instead of collapsing onto one spot.
+    """
+    
+
+    arr = np.asarray(hit_mask, dtype=float)
+    density = uniform_filter(arr, size=window, mode="constant")
+    ny, nx = arr.shape
+    half = window // 2
+    chosen: list[tuple[int, int]] = []
+    for idx in np.argsort(density.ravel())[::-1]:
+        cy, cx = np.unravel_index(idx, arr.shape)
+        if any(abs(cy - py) < window and abs(cx - px) < window for py, px in chosen):
+            continue
+        chosen.append((int(cy), int(cx)))
+        if len(chosen) == n:
+            break
+    return [(slice(max(cy - half, 0), min(cy + half, ny)),
+              slice(max(cx - half, 0), min(cx + half, nx))) for cy, cx in chosen]

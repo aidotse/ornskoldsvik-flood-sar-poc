@@ -47,6 +47,10 @@ manifest:
   - {track: 22, role: post-peak+MONIT02-label-source, name: S1A_IW_SLC__1SDV_20250915T050601_20250915T050628_060994_07996F_0088.SAFE}
   - {track: 22, role: post-recession, name: S1C_IW_RAW__0SDV_20250921T050501_20250921T050534_004218_0085E9_8EEE.SAFE}
   - {track: 22, role: post-recession, name: S1C_IW_GRDH_1SDV_20250921T050505_20250921T050530_004218_0085E9_8CA0.SAFE}
+  - {track: 22,  role: pre-existing-anchor, name: S1C_IW_RAW__0SDV_20250909T050501_20250909T050533_004043_00809C_8A83.SAFE}
+  - {track: 22,  role: pre-existing-anchor, name: S1C_IW_GRDH_1SDV_20250909T050505_20250909T050530_004043_00809C_1E3D.SAFE}
+  - {track: 131, role: pre, name: S1C_IW_GRDH_1SDV_20250904T161326_20250904T161351_003977_007E9B_AFA5.SAFE}
+  - {track: 22,  role: pre-existing-anchor, name: S1C_IW_SLC__1SDV_20250909T050504_20250909T050531_004043_00809C_7A6D.SAFE}
 
 # Optional extensions (skip for now; add by uncommenting):
 #  - {track: 131, role: pre-deep-baseline, name_prefix: S1C_IW_..._20250823T...}   # ~3.5 GB
@@ -59,6 +63,8 @@ manifest:
 ems_downloads:
   - EMSR841_AOI01_FEP_PRODUCT_v1
   - EMSR841_AOI01_DEL_PRODUCT_v1
+  - EMSR841_AOI01_DEL_MONIT01_v1
+  - EMSR841_AOI01_DEL_MONIT02_v1
 
 download:
   target_dir: data/copernicus_data/S1

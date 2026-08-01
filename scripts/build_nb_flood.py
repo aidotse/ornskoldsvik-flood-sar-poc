@@ -265,6 +265,69 @@ for j, ax in enumerate(axes):
 """))
 
 cells.append(M("""\
+## Three zoomed hotspots — before / during / after
+
+The plot above shows the whole labelled valley, but the actual flood is small enough
+(≈2.6 km² total) that individual water bodies are hard to make out by eye at that
+scale. Below: the **3 sub-areas where the detector found the most correctly-detected
+flood** at the best-scoring scene (real, EMS-confirmed water, not false alarms), each
+shown at three points in time on the *same track* — an early pre-event pass, the
+best-scoring during-event pass, and a late post-event pass — so the same physical
+ground can be watched actually flooding and draining. Same 3-panel layout as above,
+one row per date; each row also states its own IoU, since the detection method
+(single-image vs log-ratio) legitimately differs by scene.\
+"""))
+
+cells.append(C("""\
+# Three zoomed hotspots: most correctly-detected flood, before/during/after the
+# same track (identical viewing geometry -> a fair "watch this spot" comparison).
+best_meta = scenes[k]["meta"]
+track_keys = sorted([kk for kk in keys if scenes[kk]["meta"].relative_orbit == best_meta.relative_orbit],
+                     key=lambda kk: scenes[kk]["meta"].start)
+before_k, during_k, after_k = track_keys[0], k, track_keys[-1]
+print(f"rel{best_meta.relative_orbit} track: before={before_k} | during={during_k} | after={after_k}")
+
+WIN = 60  # px, 20 m grid -> 1.2x1.2 km per hotspot
+tp_full = np.asarray(pred) & np.asarray(truth)
+windows = flood.top_hotspot_windows(tp_full, window=WIN, n=3)
+
+for wi, (ysl, xsl) in enumerate(windows, 1):
+    print(f"hotspot {wi}/3: ~{WIN * 0.02:.1f}x{WIN * 0.02:.1f} km window, "
+          f"{int(tp_full[ysl, xsl].sum())} true-positive px inside")
+    fig, axes = plt.subplots(3, 3, figsize=(13, 12), layout="constrained")
+    for row, (tk, label) in enumerate([(before_k, "before"), (during_k, "during"), (after_k, "after")]):
+        dbz = flood.to_db(scenes[tk]["da"]).where(aoi_mask).isel(y=ysl, x=xsl)
+        predz = detections[tk].isel(y=ysl, x=xsl)
+        truthz = truth.isel(y=ysl, x=xsl)
+        yyz = dbz.y.values
+        extent = [float(dbz.x[0]), float(dbz.x[-1]), float(min(yyz[0], yyz[-1])), float(max(yyz[0], yyz[-1]))]
+        imargs = dict(extent=extent, origin="lower" if yyz[0] < yyz[-1] else "upper", aspect="equal")
+
+        axes[row, 0].imshow(dbz.values, cmap="gray", vmin=-25, vmax=0, **imargs)
+        axes[row, 1].imshow(np.where(predz.values, 1.0, np.nan), cmap="Blues", vmin=0, vmax=1.5, **imargs)
+        p, tr = predz.values, truthz.values
+        overlay = np.zeros(p.shape + (4,))
+        overlay[p & tr] = (0, 0.7, 0, 0.9)     # green TP
+        overlay[p & ~tr] = (0.95, 0.6, 0, 0.5) # orange FP
+        overlay[~p & tr] = (0.85, 0, 0, 0.9)   # red FN
+        axes[row, 2].imshow(overlay, **imargs)
+
+        m = flood.iou_f1(predz, truthz)
+        axes[row, 2].annotate(f"IoU {m['iou']:.2f}", xy=(0.03, 0.95), xycoords="axes fraction",
+                               fontsize=9, color="white", va="top",
+                               bbox=dict(boxstyle="round,pad=0.2", fc="black", alpha=0.55))
+        axes[row, 0].set_ylabel(f"{tk}\\n({label})", fontsize=8)
+        for j in range(3):
+            axes[row, j].set_ylim(extent[2], extent[3])
+            axes[row, j].set_xticklabels([])
+            if j: axes[row, j].set_yticklabels([])
+    for j, t in enumerate(["σ⁰ dB", "detected water", "vs EMS (green TP / orange FP / red FN)"]):
+        axes[0, j].set_title(t, fontsize=9)
+    fig.suptitle(f"Hotspot {wi}/3 — before / during / after (rel{best_meta.relative_orbit} track)")
+None\
+"""))
+
+cells.append(M("""\
 ## Takeaways (final run of 2026-07-16, full manifest on disk)
 
 - The σ⁰ → geocode → threshold pipeline runs end-to-end on all 11 scenes at
