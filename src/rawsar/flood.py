@@ -1,14 +1,14 @@
 """Flood mapping baseline: thresholding, log-ratio change detection, EMS label metrics."""
 
 from __future__ import annotations
-
 from pathlib import Path
-
 import geopandas as gpd
 import numpy as np
 import xarray as xr
 from rasterio import features
 from scipy.ndimage import uniform_filter
+from scipy.ndimage import median_filter
+
 
 
 def to_db(sigma0: xr.DataArray) -> xr.DataArray:
@@ -48,6 +48,55 @@ def water_mask_logratio(
     ratio = db_event - db_ref
     thr = min(otsu_threshold(ratio.values), max_threshold_db)
     return (ratio < thr) & np.isfinite(ratio), thr
+
+def despeckle(db: xr.DataArray, size: int = 3) -> xr.DataArray:
+    """Median-filter speckle reduction on a dB image, applied before thresholding.
+
+    NaNs (outside-AOI / nodata) pass through untouched by filtering just the finite
+    region and re-inserting NaNs, so the AOI boundary doesn't bleed into the filter.
+    """
+    
+
+    v = db.values
+    finite = np.isfinite(v)
+    filtered = median_filter(np.where(finite, v, 0.0), size=size)
+    filtered = np.where(finite, filtered, np.nan)
+    return xr.DataArray(filtered, coords=db.coords, dims=db.dims)
+
+
+def slope_deg(dem: xr.DataArray) -> xr.DataArray:
+    """Terrain slope in degrees from a DEM on a regular grid (resolution via dem.rio)."""
+    res_x, res_y = dem.rio.resolution()
+    gy, gx = np.gradient(dem.values, abs(res_y), abs(res_x))
+    slope = np.degrees(np.arctan(np.hypot(gx, gy)))
+    return xr.DataArray(slope, coords=dem.coords, dims=dem.dims)
+
+
+def water_mask_adaptive(signal: xr.DataArray, block: int = 100, k: float = 2.0) -> tuple[xr.DataArray, float]:
+    """Locally-adaptive dark-pixel mask: water where pixel < local_mean - k*local_std.
+
+    Unlike water_mask_single's one global Otsu cutoff, the threshold varies spatially
+    (box-filter local mean/std via scipy.ndimage.uniform_filter) — useful where the
+    backscatter baseline itself shifts across the scene (soil/vegetation/incidence
+    angle), so a single global number either misses subtly-darker regions or
+    over-triggers in naturally-darker ones.
+
+    Known simplification: local mean/std are computed with NaN (outside-AOI) pixels
+    zero-filled, which biases results right at the AOI edge. Fine for comparing
+    techniques here; not precise enough for production use at the boundary.
+    """
+    
+
+    v = signal.values
+    finite = np.isfinite(v)
+    filled = np.where(finite, v, 0.0)
+    local_mean = uniform_filter(filled, size=block)
+    local_mean_sq = uniform_filter(filled ** 2, size=block)
+    local_std = np.sqrt(np.clip(local_mean_sq - local_mean ** 2, 0, None))
+    local_thr = local_mean - k * local_std
+    mask = (v < local_thr) & finite
+    return xr.DataArray(mask, coords=signal.coords, dims=signal.dims), float(np.nanmean(local_thr))
+
 
 
 def rasterize_labels(gdf: gpd.GeoDataFrame, template: xr.DataArray) -> xr.DataArray:

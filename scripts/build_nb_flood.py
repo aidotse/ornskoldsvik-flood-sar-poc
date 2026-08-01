@@ -466,6 +466,233 @@ number here comes straight from the GRD pixels and the EMS polygons; no detectio
 algorithm of ours is involved.\
 """))
 
+cells.append(M("""\
+## Trying smarter detection techniques
+
+The baseline above is deliberately simple (single global Otsu cutoff, or log-ratio
+against a pre-event reference) — its own Takeaways cell already names the gaps: no
+despeckling, no slope mask. Below: three targeted improvements, each evaluated the
+same way as the baseline (per-scene IoU/F1 table, best-scene visual, 3 zoomed
+before/during/after hotspots), so any improvement is measured, not assumed. A shared
+`evaluate_and_plot()` helper runs that whole evaluation once per technique instead of
+repeating ~100 lines of scoring/plotting code three more times.\
+"""))
+
+cells.append(C("""\
+def evaluate_and_plot(name, detect):
+    '''Run detect(scene_key) -> (mask, thr, note) over every scene, score against EMS,
+    print the table, draw the best-scene visual + 3 zoomed hotspots. Returns
+    (scores_df, detections_dict) in the same shape as the baseline scores/detections.'''
+    rows, dets = [], {}
+    for kk in keys:
+        meta = scenes[kk]["meta"]
+        mask, thr, note = detect(kk)
+        dets[kk] = mask
+        db_kk = flood.to_db(scenes[kk]["da"]).where(aoi_mask)
+        valid = np.isfinite(db_kk) & aoi_mask
+        t = pd.Timestamp(meta.start)
+        nearest = min(labels, key=lambda L: abs(labels[L]["time"] - t))
+        tr = labels[nearest]["mask"]
+        if "max_extent" in labels[nearest]:
+            tr = tr | labels[nearest]["max_extent"]
+        tr = tr & ~perm_water
+        m = flood.iou_f1(mask, tr, valid=valid)
+        mu = flood.iou_f1(mask, ems_union & ~perm_water, valid=valid)
+        rows.append({"scene": kk, "method": note, "thr_dB": round(thr, 1),
+                     "vs": nearest, "offset_h": round(abs((labels[nearest]["time"] - t).total_seconds()) / 3600, 1),
+                     "IoU": round(m["iou"], 3), "F1": round(m["f1"], 3),
+                     "IoU_union": round(mu["iou"], 3),
+                     "pred_km2": round(m["pred_area_km2"], 1), "ems_km2": round(m["truth_area_km2"], 1)})
+    df = pd.DataFrame(rows)
+    print(f"=== {name} ===")
+    display(df)
+
+    best_row = df.sort_values("IoU_union").iloc[-1]
+    bk = best_row["scene"]
+    db_b = flood.to_db(scenes[bk]["da"]).where(aoi_mask)
+    truth_b = ems_union & ~perm_water
+    pred_b = dets[bk]
+    ys, xs = np.where(np.asarray(ems_union))
+    y0, y1 = max(ys.min() - 100, 0), min(ys.max() + 100, ems_union.shape[0])
+    x0, x1 = max(xs.min() - 100, 0), min(xs.max() + 100, ems_union.shape[1])
+    sl = dict(y=slice(y0, y1), x=slice(x0, x1))
+    dbz = db_b.isel(**sl)
+    yyz = dbz.y.values
+    extent = [float(dbz.x[0]), float(dbz.x[-1]), float(min(yyz[0], yyz[-1])), float(max(yyz[0], yyz[-1]))]
+    imargs = dict(extent=extent, origin="lower" if yyz[0] < yyz[-1] else "upper", aspect="equal")
+    fig, axes = plt.subplots(1, 3, figsize=(16, 5.5), layout="constrained")
+    axes[0].imshow(dbz.values, cmap="gray", vmin=-25, vmax=0, **imargs)
+    axes[0].set_title(f"σ⁰ dB — {bk}")
+    axes[1].imshow(np.where(pred_b.isel(**sl).values, 1.0, np.nan), cmap="Blues", vmin=0, vmax=1.5, **imargs)
+    axes[1].set_title(f"{name} detected water ({best_row['method']})")
+    p = pred_b.isel(**sl).values; tr2 = truth_b.isel(**sl).values
+    overlay = np.zeros(p.shape + (4,))
+    overlay[p & tr2] = (0, 0.7, 0, 0.9)     # green TP
+    overlay[p & ~tr2] = (0.95, 0.6, 0, 0.5) # orange FP
+    overlay[~p & tr2] = (0.85, 0, 0, 0.9)   # red FN
+    axes[2].imshow(overlay, **imargs)
+    axes[2].set_title(f"vs EMS union — IoU {best_row['IoU_union']} (offset {best_row['offset_h']} h)")
+    for j, ax in enumerate(axes):
+        ax.set_ylim(extent[2], extent[3])
+        if j: ax.set_yticklabels([])
+    fig.suptitle(f"{name} — best-scoring scene")
+
+    tp_full = np.asarray(pred_b) & np.asarray(truth_b)
+    windows = flood.top_hotspot_windows(tp_full, window=WIN, n=3)
+    track_keys2 = sorted([kk for kk in keys if scenes[kk]["meta"].relative_orbit == scenes[bk]["meta"].relative_orbit],
+                          key=lambda kk: scenes[kk]["meta"].start)
+    hb, hd, ha = track_keys2[0], bk, track_keys2[-1]
+    for wi, (ysl, xsl) in enumerate(windows, 1):
+        print(f"{name} hotspot {wi}/3: ~{WIN * 0.02:.1f}x{WIN * 0.02:.1f} km window, "
+              f"{int(tp_full[ysl, xsl].sum())} true-positive px inside")
+        fig, axes = plt.subplots(3, 3, figsize=(13, 12), layout="constrained")
+        for row, (tk, lbl) in enumerate([(hb, "before"), (hd, "during"), (ha, "after")]):
+            dbz2 = flood.to_db(scenes[tk]["da"]).where(aoi_mask).isel(y=ysl, x=xsl)
+            predz = dets[tk].isel(y=ysl, x=xsl)
+            truthz = truth_b.isel(y=ysl, x=xsl)
+            yyz2 = dbz2.y.values
+            extent2 = [float(dbz2.x[0]), float(dbz2.x[-1]), float(min(yyz2[0], yyz2[-1])), float(max(yyz2[0], yyz2[-1]))]
+            imargs2 = dict(extent=extent2, origin="lower" if yyz2[0] < yyz2[-1] else "upper", aspect="equal")
+            axes[row, 0].imshow(dbz2.values, cmap="gray", vmin=-25, vmax=0, **imargs2)
+            axes[row, 1].imshow(np.where(predz.values, 1.0, np.nan), cmap="Blues", vmin=0, vmax=1.5, **imargs2)
+            pz, trz = predz.values, truthz.values
+            ov = np.zeros(pz.shape + (4,))
+            ov[pz & trz] = (0, 0.7, 0, 0.9)
+            ov[pz & ~trz] = (0.95, 0.6, 0, 0.5)
+            ov[~pz & trz] = (0.85, 0, 0, 0.9)
+            axes[row, 2].imshow(ov, **imargs2)
+            mrow = flood.iou_f1(predz, truthz)
+            axes[row, 2].annotate(f"IoU {mrow['iou']:.2f}", xy=(0.03, 0.95), xycoords="axes fraction",
+                                   fontsize=9, color="white", va="top",
+                                   bbox=dict(boxstyle="round,pad=0.2", fc="black", alpha=0.55))
+            axes[row, 0].set_ylabel(f"{tk}\\n({lbl})", fontsize=8)
+            for j in range(3):
+                axes[row, j].set_ylim(extent2[2], extent2[3])
+                axes[row, j].set_xticklabels([])
+                if j: axes[row, j].set_yticklabels([])
+        for j, t in enumerate(["σ⁰ dB", "detected water", "vs EMS (green TP / orange FP / red FN)"]):
+            axes[0, j].set_title(t, fontsize=9)
+        fig.suptitle(f"{name} — hotspot {wi}/3 (rel{scenes[bk]['meta'].relative_orbit} track)")
+    return df, dets\
+"""))
+
+cells.append(M("""\
+### 1. Despeckle
+
+SAR images are inherently speckled — random constructive/destructive interference
+that makes even a uniform surface look noisy pixel-to-pixel. A single noisy dark
+pixel can trip a threshold even on dry land, and a single noisy bright pixel inside
+real water can escape one. A median filter smooths that out *before* thresholding,
+using the exact same Otsu/log-ratio decision logic as the baseline otherwise.\
+"""))
+
+cells.append(C("""\
+def detect_despeckle(kk):
+    meta = scenes[kk]["meta"]
+    db = flood.despeckle(flood.to_db(scenes[kk]["da"]).where(aoi_mask))
+    ref = same_track_reference(meta, prods)
+    if ref is not None:
+        ref_da = grd.gtc_sigma0(ref, "VV", dem_path,
+                                GTC_DIR / f"{ref.platform}_{ref.relative_orbit:03d}_{ref.start:%Y%m%d}_VV_sigma0.tif",
+                                crop_bbox=BBOX)
+        ref_db = flood.despeckle(flood.to_db(ref_da).where(aoi_mask))
+        mask, thr = flood.water_mask_logratio(db, ref_db)
+        note = f"despeckle+log-ratio vs {ref.start:%b %d}"
+    else:
+        mask, thr = flood.water_mask_single(db)
+        note = "despeckle+single-image Otsu"
+    return mask, thr, note
+
+scores_despeckle, dets_despeckle = evaluate_and_plot("despeckle", detect_despeckle)\
+"""))
+
+cells.append(M("""\
+### 2. Slope-mask
+
+Water doesn't sit on a hillside — but steep terrain can still look radar-dark
+(layover/shadow geometry, not water), a known false-positive source for a plain
+brightness threshold. This builds on the despeckled detector above and removes any
+"water" pixel sitting on a slope steeper than 5°, using the GLO-30 DEM already
+downloaded for geocoding.\
+"""))
+
+cells.append(C("""\
+dem_da = rioxarray.open_rasterio(dem_path).squeeze("band", drop=True)
+assert dem_da.shape == scenes[keys[0]]["da"].shape, "DEM grid doesn't match sigma0 grid"
+flat_mask = flood.slope_deg(dem_da) < 5.0
+print(f"flat-terrain (<5°) fraction of AOI: {float((flat_mask & aoi_mask).sum() / aoi_mask.sum()):.2f}")
+
+def detect_slope(kk):
+    mask, thr, note = detect_despeckle(kk)
+    return mask & flat_mask, thr, note + " + slope<5°"
+
+scores_slope, dets_slope = evaluate_and_plot("slope-mask", detect_slope)\
+"""))
+
+cells.append(M("""\
+### 3. Adaptive local threshold
+
+The baseline picks one brightness cutoff for the *whole* scene. But the AOI spans
+different land cover (fields, forest, riverbank), so the "normal, dry" backscatter
+level genuinely differs place to place — one global number is either too strict
+somewhere or too loose elsewhere. This computes a locally-varying threshold instead:
+a pixel counts as water if it's darker than *its own neighbourhood's* average, not
+the whole scene's.\
+"""))
+
+cells.append(C("""\
+def detect_adaptive(kk):
+    meta = scenes[kk]["meta"]
+    db = flood.despeckle(flood.to_db(scenes[kk]["da"]).where(aoi_mask))
+    ref = same_track_reference(meta, prods)
+    if ref is not None:
+        ref_da = grd.gtc_sigma0(ref, "VV", dem_path,
+                                GTC_DIR / f"{ref.platform}_{ref.relative_orbit:03d}_{ref.start:%Y%m%d}_VV_sigma0.tif",
+                                crop_bbox=BBOX)
+        ref_db = flood.despeckle(flood.to_db(ref_da).where(aoi_mask))
+        signal = db - ref_db
+        note = f"adaptive log-ratio vs {ref.start:%b %d}"
+    else:
+        signal = db
+        note = "adaptive single-image"
+    mask, thr = flood.water_mask_adaptive(signal, block=100, k=2.0)
+    return mask, thr, note
+
+scores_adaptive, dets_adaptive = evaluate_and_plot("adaptive", detect_adaptive)\
+"""))
+
+cells.append(M("""\
+## Comparing all four methods
+
+Same scenes, same EMS labels, four different detectors. Stacked into one table and
+saved so future runs (or future techniques) have something concrete to compare
+against."\
+"""))
+
+cells.append(C("""\
+all_scores = pd.concat([
+    scores.assign(technique="baseline"),
+    scores_despeckle.assign(technique="despeckle"),
+    scores_slope.assign(technique="slope-mask"),
+    scores_adaptive.assign(technique="adaptive"),
+], ignore_index=True)
+summary = all_scores.groupby("technique")[["IoU", "F1", "IoU_union"]].mean().round(3)
+summary = summary.reindex(["baseline", "despeckle", "slope-mask", "adaptive"])
+print(summary)
+
+out_csv = ROOT / "docs/flood_method_comparison.csv"
+all_scores.to_csv(out_csv, index=False)
+print("wrote", out_csv)
+
+fig, ax = plt.subplots(figsize=(7, 4), layout="constrained")
+summary["IoU_union"].plot.bar(ax=ax, color="steelblue")
+ax.set_ylabel("mean IoU vs EMS union")
+ax.set_title("Mean IoU_union across all scenes, per technique")
+plt.setp(ax.get_xticklabels(), rotation=20, ha="right")
+None\
+"""))
+
+
 nb.cells = cells
 nb.metadata["kernelspec"] = {"name": "python3", "display_name": "Python 3", "language": "python"}
 out = "notebooks/flood_timeseries.ipynb"
