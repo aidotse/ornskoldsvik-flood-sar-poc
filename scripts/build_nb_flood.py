@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Author notebooks/flood_timeseries.ipynb (source of truth for the notebook)."""
+"""Author notebooks/nb_flood.ipynb (source of truth for the notebook)."""
 
 import nbformat as nbf
 
@@ -8,7 +8,7 @@ C, M = nbf.v4.new_code_cell, nbf.v4.new_markdown_cell
 cells = []
 
 cells.append(M("""\
-# 02 — Flood time series: Örnsköldsvik / Gottne (EMSR841), Sept 2025
+# Flood time series: Örnsköldsvik / Gottne (EMSR841), Sept 2025
 
 Sentinel-1 GRD σ⁰ over the EMS AOI, geocoded with **sarsen** + GLO-30 (20 m, UTM 33N),
 water masks from VV backscatter, scored against Copernicus EMS labels.
@@ -1104,6 +1104,6 @@ masked, not just a better global threshold.\
 
 nb.cells = cells
 nb.metadata["kernelspec"] = {"name": "python3", "display_name": "Python 3", "language": "python"}
-out = "notebooks/flood_timeseries.ipynb"
+out = "notebooks/nb_flood.ipynb"
 nbf.write(nb, out)
 print("wrote", out)
