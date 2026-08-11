@@ -1,8 +1,7 @@
 # Örnsköldsvik / Gottne flood AOI (EMSR841 AOI01), Sept 2025.
 # AOI polygon derived from EMS areaOfInterestA (MONIT02 v1), convex hull, EPSG:4326.
-# Nothing below is hardcoded in code — scripts read this file.
 
-#where on the map do we care about?
+
 aoi:
   name: ornskoldsvik_gottne
   ems_activation: EMSR841
@@ -32,8 +31,6 @@ tracks:
 
 # Download manifest — full names resolved & verified against CDSE OData 2026-07-16
 # (sizes and MD5 are re-fetched from OData at download time; total core ≈ 33.8 GB).
-
-# pre for 131???
 manifest:
   - {track: 131, role: during+FEP-label-source, name: S1A_IW_RAW__0SDV_20250910T161414_20250910T161446_060928_0796C3_BE25.SAFE}
   - {track: 131, role: during+FEP-label-source, name: S1A_IW_GRDH_1SDV_20250910T161417_20250910T161442_060928_0796C3_FC8C.SAFE}
@@ -47,10 +44,21 @@ manifest:
   - {track: 22, role: post-peak+MONIT02-label-source, name: S1A_IW_SLC__1SDV_20250915T050601_20250915T050628_060994_07996F_0088.SAFE}
   - {track: 22, role: post-recession, name: S1C_IW_RAW__0SDV_20250921T050501_20250921T050534_004218_0085E9_8EEE.SAFE}
   - {track: 22, role: post-recession, name: S1C_IW_GRDH_1SDV_20250921T050505_20250921T050530_004218_0085E9_8CA0.SAFE}
-  - {track: 22,  role: pre-existing-anchor, name: S1C_IW_RAW__0SDV_20250909T050501_20250909T050533_004043_00809C_8A83.SAFE}
-  - {track: 22,  role: pre-existing-anchor, name: S1C_IW_GRDH_1SDV_20250909T050505_20250909T050530_004043_00809C_1E3D.SAFE}
+  # Cross-track during-event GRDs. These six datatakes were the original on-disk
+  # archive and were long absent from this manifest, so a fresh clone could only
+  # rebuild 5 of notebook 02's 11 scenes. Named here so the whole series is
+  # reproducible from this config alone (+20.8 GB with the two 00809C products below).
   - {track: 131, role: pre, name: S1C_IW_GRDH_1SDV_20250904T161326_20250904T161351_003977_007E9B_AFA5.SAFE}
-  - {track: 22,  role: pre-existing-anchor, name: S1C_IW_SLC__1SDV_20250909T050504_20250909T050531_004043_00809C_7A6D.SAFE}
+  - {track: 168, role: during, name: S1C_IW_GRDH_1SDV_20250907T052130_20250907T052155_004014_007FB5_3BF9.SAFE}
+  - {track: 95, role: during, name: S1A_IW_GRDH_1SDV_20250908T051414_20250908T051439_060892_079552_B953.SAFE}
+  - {track: 102, role: during, name: S1A_IW_GRDH_1SDV_20250908T163039_20250908T163104_060899_079599_2E7A.SAFE}
+  - {track: 29, role: during, name: S1C_IW_GRDH_1SDV_20250909T162136_20250909T162201_004050_0080D6_F753.SAFE}
+  # Datatake 00809C (S1C rel 22, Sept 9) — notebook 03's primary RAW subject, the
+  # zarr store's DESC raw anchor (GRD supplies the GCP grid), and the SLC notebook
+  # 03 sanity-checks its own focusing against.
+  - {track: 22, role: during+raw-anchor, name: S1C_IW_GRDH_1SDV_20250909T050505_20250909T050530_004043_00809C_1E3D.SAFE}
+  - {track: 22, role: during+raw-anchor, name: S1C_IW_RAW__0SDV_20250909T050501_20250909T050533_004043_00809C_8A83.SAFE}
+  - {track: 22, role: during+raw-anchor-slc, name: S1C_IW_SLC__1SDV_20250909T050504_20250909T050531_004043_00809C_7A6D.SAFE}
 
 # Optional extensions (skip for now; add by uncommenting):
 #  - {track: 131, role: pre-deep-baseline, name_prefix: S1C_IW_..._20250823T...}   # ~3.5 GB
@@ -60,6 +68,9 @@ manifest:
 # EMS products still missing from disk (public HTTP, no auth).
 # AOI02 DEL does NOT exist: dashboard API says "Not produced because of remote
 # sensing limitations" (statusCode N, empty downloadPath) — verified 2026-07-16.
+# All four AOI01 products are listed: MONIT01/MONIT02 used to be omitted because they
+# happened to be on disk already, which broke a fresh clone — notebook 02 reads its AOI
+# polygon from MONIT02 and scores against all four.
 ems_downloads:
   - EMSR841_AOI01_FEP_PRODUCT_v1
   - EMSR841_AOI01_DEL_PRODUCT_v1
@@ -69,4 +80,22 @@ ems_downloads:
 download:
   target_dir: data/copernicus_data/S1
   ems_dir: data/copernicus_data
-  hard_cap_gb: 50
+  # 33.8 GB original manifest + 20.8 GB of the newly-named products above.
+  hard_cap_gb: 60
+
+# Copernicus GLO-30 DEM tiles — public AWS S3, no auth. Merged/clipped/reprojected
+# into data/dem/aoi_glo30_utm33_20m.tif by grd.prepare_dem().
+dem:
+  url_template: https://copernicus-dem-30m.s3.amazonaws.com/{tile}/{tile}.tif
+  tiles:
+    - Copernicus_DSM_COG_10_N63_00_E017_00_DEM
+    - Copernicus_DSM_COG_10_N63_00_E018_00_DEM
+
+# SMHI open data — no API key. metobs parameter 5 = daily precipitation,
+# hydroobs parameter 1 = daily discharge; corrected-archive covers Sept 2025.
+smhi:
+  precip:
+    - {station: 138180, name: ornskoldsvik}   # 26 km away, covers the event window
+    - {station: 138270, name: bredbyn}        # 5.9 km away, but archive gap over the flood week
+  discharge:
+    - {station: 1583, name: vastersel}        # Moälven, 4.6 km from the labels
