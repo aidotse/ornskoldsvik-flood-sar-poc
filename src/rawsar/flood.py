@@ -1,14 +1,14 @@
 """Flood mapping baseline: thresholding, log-ratio change detection, EMS label metrics."""
 
 from __future__ import annotations
+
+from collections.abc import Iterable
 from pathlib import Path
+
 import geopandas as gpd
 import numpy as np
 import xarray as xr
 from rasterio import features
-from scipy.ndimage import uniform_filter
-from scipy.ndimage import median_filter
-
 
 
 def to_db(sigma0: xr.DataArray) -> xr.DataArray:
@@ -49,13 +49,14 @@ def water_mask_logratio(
     thr = min(otsu_threshold(ratio.values), max_threshold_db)
     return (ratio < thr) & np.isfinite(ratio), thr
 
+
 def despeckle(db: xr.DataArray, size: int = 3) -> xr.DataArray:
     """Median-filter speckle reduction on a dB image, applied before thresholding.
 
     NaNs (outside-AOI / nodata) pass through untouched by filtering just the finite
     region and re-inserting NaNs, so the AOI boundary doesn't bleed into the filter.
     """
-    
+    from scipy.ndimage import median_filter
 
     v = db.values
     finite = np.isfinite(v)
@@ -85,7 +86,7 @@ def water_mask_adaptive(signal: xr.DataArray, block: int = 100, k: float = 2.0) 
     zero-filled, which biases results right at the AOI edge. Fine for comparing
     techniques here; not precise enough for production use at the boundary.
     """
-    
+    from scipy.ndimage import uniform_filter
 
     v = signal.values
     finite = np.isfinite(v)
@@ -96,7 +97,6 @@ def water_mask_adaptive(signal: xr.DataArray, block: int = 100, k: float = 2.0) 
     local_thr = local_mean - k * local_std
     mask = (v < local_thr) & finite
     return xr.DataArray(mask, coords=signal.coords, dims=signal.dims), float(np.nanmean(local_thr))
-
 
 
 def rasterize_labels(gdf: gpd.GeoDataFrame, template: xr.DataArray) -> xr.DataArray:
@@ -118,17 +118,58 @@ def iou_f1(pred: xr.DataArray, truth: xr.DataArray, valid: xr.DataArray | None =
     if valid is not None:
         m = np.asarray(valid.values, bool)
         p, t = p & m, t & m
+        n_valid = int(m.sum())
+    else:
+        n_valid = p.size
     tp = int((p & t).sum())
     fp = int((p & ~t).sum())
     fn = int((~p & t).sum())
+    tn = n_valid - tp - fp - fn
     iou = tp / (tp + fp + fn) if tp + fp + fn else float("nan")
     f1 = 2 * tp / (2 * tp + fp + fn) if tp else 0.0
-    return {"tp": tp, "fp": fp, "fn": fn, "iou": iou, "f1": f1,
+    # precision/recall/fpr matter most for *ever-detected* scoring (see
+    # temporal_union): recall = how much of an ever-flooded reference we ever
+    # capture, fpr = how much of the never-flooded area we ever mis-flag.
+    precision = tp / (tp + fp) if (tp + fp) else float("nan")
+    recall = tp / (tp + fn) if (tp + fn) else float("nan")
+    fpr = fp / (fp + tn) if (fp + tn) else float("nan")
+    return {"tp": tp, "fp": fp, "fn": fn, "tn": tn, "iou": iou, "f1": f1,
+            "precision": precision, "recall": recall, "fpr": fpr,
             "pred_area_km2": p.sum() * 0.0004, "truth_area_km2": t.sum() * 0.0004}
 
 
 def load_ems_layer(path: str | Path) -> gpd.GeoDataFrame:
     return gpd.read_file(path)
+
+
+def temporal_union(masks: Iterable[xr.DataArray]) -> xr.DataArray:
+    """OR-reduce boolean masks across time: True wherever *any* scene flagged water.
+
+    Puts a per-scene detector on the same temporal footing as an EMS label union
+    (observedEvent + maximumFloodExtent across products/dates), which already means
+    "flooded at some point", not "flooded in this one image". Scoring a single
+    scene's mask against that union unfairly penalises real flood that had already
+    receded by that pass; unioning detections over time first fixes the comparison.
+    """
+    masks = list(masks)
+    out = masks[0]
+    for m in masks[1:]:
+        out = out | m
+    return out
+
+
+def detection_frequency(masks: Iterable[xr.DataArray]) -> xr.DataArray:
+    """Fraction of scenes each pixel was flagged as water, in [0, 1].
+
+    A persistence diagnostic: real flood tends to be flagged repeatedly across
+    during-event passes, while speckle/geometry false positives tend to flicker
+    in a single scene and vanish in the next.
+    """
+    masks = list(masks)
+    stacked = np.stack([np.asarray(m.values, bool) for m in masks], axis=0)
+    freq = stacked.mean(axis=0)
+    return xr.DataArray(freq, coords=masks[0].coords, dims=masks[0].dims)
+
 
 def top_hotspot_windows(hit_mask: np.ndarray, window: int = 60, n: int = 3) -> list[tuple[slice, slice]]:
     """Top-n (y, x) window slices ranked by hit density in hit_mask, centers >= window apart.
@@ -136,7 +177,7 @@ def top_hotspot_windows(hit_mask: np.ndarray, window: int = 60, n: int = 3) -> l
     Greedy pick over a local-density map (box filter), so picks land on genuinely
     different parts of a corridor-shaped extent instead of collapsing onto one spot.
     """
-    
+    from scipy.ndimage import uniform_filter
 
     arr = np.asarray(hit_mask, dtype=float)
     density = uniform_filter(arr, size=window, mode="constant")

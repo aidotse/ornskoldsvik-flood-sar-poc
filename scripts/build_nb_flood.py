@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Author notebooks/flood_timeseries.ipynb (source of truth for the notebook)."""
+"""Author notebooks/nb_flood.ipynb (source of truth for the notebook)."""
 
 import nbformat as nbf
 
@@ -220,10 +220,10 @@ scores\
 """))
 
 cells.append(M("""\
-The per-scene numbers above are the honest baseline. Expected pattern: the largest
-detected areas and best agreement around Sept 8–10; IoU is limited both by the
-label-to-acquisition offset (flood recedes between S1 pass and EMS source image)
-and by single-image detection where no same-track reference exists yet.\
+`IoU_union` peaks at Sept 9–10 (0.058–0.076) and is lowest on the pre-event
+reference passes (Sept 3–4, near zero by construction) and the furthest
+post-event pass (Sept 21, 0.033) — consistent with the label-to-acquisition
+offset and the flood receding over time.\
 """))
 
 cells.append(C("""\
@@ -328,7 +328,7 @@ None\
 """))
 
 cells.append(M("""\
-## Takeaways (final run of 2026-07-16, full manifest on disk)
+## Takeaways
 
 - The σ⁰ → geocode → threshold pipeline runs end-to-end on all 11 scenes at
   ~50 s/scene (sarsen GTC, AOI-cropped, 20 m grid, peak ~6.6 GB RSS).
@@ -666,7 +666,7 @@ cells.append(M("""\
 
 Same scenes, same EMS labels, four different detectors. Stacked into one table and
 saved so future runs (or future techniques) have something concrete to compare
-against."\
+against, not just a memory of "it looked better."\
 """))
 
 cells.append(C("""\
@@ -692,9 +692,418 @@ plt.setp(ax.get_xticklabels(), rotation=20, ha="right")
 None\
 """))
 
+cells.append(M("""\
+## Takeaways — did the smarter techniques actually help?
+
+No. All three refinements score **below** the baseline's mean `IoU_union` (0.047):
+despeckle 0.019, slope-mask 0.016, adaptive 0.027 — roughly half the baseline or
+worse, not an improvement. On a 2.6 km² union of thin flood polygons, none of
+despeckling, slope-masking or adaptive thresholding beats a single global Otsu
+cutoff. `docs/flood_method_comparison.csv` has every scene × technique
+combination for follow-up.\
+"""))
+
+cells.append(M("""\
+## Ever-detected water — putting our detections on the same time footing as EMS
+
+Every score above compares **one image's mask** against `ems_union`, which is
+already a *temporal* union — `observedEventA` ∪ `maximumFloodExtentA`, stacked
+across four EMS products published on four different dates. That's an apples-to-
+oranges comparison: a pixel that was genuinely underwater on Sept 9 but drained
+before a later pass counts as a miss in that pass's row, even though the flood
+was real. EMS's red pixels answer "did this ever flood"; our per-scene green
+pixels only ever answered "is this flooded in this one image".
+
+Fix: union each technique's detections **over all its scenes** first — "did we
+ever flag this pixel as water, on any pass" — then score that against the same
+`ems_union` red layer. Both sides are now "ever", so the comparison is fair.\
+"""))
+
+cells.append(C("""\
+ever_detected = {
+    "baseline":   flood.temporal_union(detections.values()),
+    "despeckle":  flood.temporal_union(dets_despeckle.values()),
+    "slope-mask": flood.temporal_union(dets_slope.values()),
+    "adaptive":   flood.temporal_union(dets_adaptive.values()),
+}
+ems_ever = ems_union & ~perm_water   # same "ever flooded, minus permanent water" reference as above
+ever_valid = aoi_mask                # AOI-cropped grid is common to every scene -> the comparison domain
+
+ever_rows = []
+for name, ed in ever_detected.items():
+    m = flood.iou_f1(ed, ems_ever, valid=ever_valid)
+    ever_rows.append({
+        "technique": name,
+        "recall_ever": round(m["recall"], 3),          # of EMS's ever-flooded area, how much did we EVER catch
+        "precision_ever": round(m["precision"], 3),     # of what we EVER flagged, how much was real flood
+        "fpr_ever": round(m["fpr"], 3),                 # of never-flooded AOI, how much did we EVER mis-flag
+        "iou_ever": round(m["iou"], 3),
+        "f1_ever": round(m["f1"], 3),
+        "ever_detected_km2": round(m["pred_area_km2"], 1),
+        "ems_ever_km2": round(m["truth_area_km2"], 1),
+    })
+ever_scores = pd.DataFrame(ever_rows).set_index("technique").reindex(
+    ["baseline", "despeckle", "slope-mask", "adaptive"])
+ever_scores\
+"""))
+
+cells.append(M("""\
+Reading the table: **`recall_ever`** is the direct answer to "how much of the red
+parts do we ever capture" — union all our detections across every pass and ask
+what fraction of `ems_union` that ever covers. **`fpr_ever`** is "how much is FP
+overall", expressed the honest way: not as a share of our own alerts (which
+shrinks automatically if we just detect less), but as a share of the AOI that
+never flooded at all — how much dry/permanent-water land got mis-flagged as
+flood on *at least one* pass. **`precision_ever`** is the complementary view: of
+everything we ever flagged, what fraction was real. `iou_ever`/`f1_ever` are the
+usual overlap scores, now computed on the "ever" masks instead of one scene.\
+"""))
+
+cells.append(M("""\
+### Persistence: are false positives noise, or a standing artefact?
+
+One more diagnostic `recall`/`precision` alone can't give: **how often** a given
+pixel gets flagged, not just whether it ever does. `detection_frequency` counts,
+per pixel, the fraction of *all* scenes that flagged it as water. Comparing that
+frequency inside the ever-true-positive footprint against the ever-false-positive
+footprint says whether FPs are a single noisy pass (low frequency — speckle,
+a one-off shadow) or a artefact that reappears scene after scene (high
+frequency — a real non-flood dark surface, e.g. a shadowed slope or wet field
+that never drains in the model's eyes).\
+"""))
+
+cells.append(C("""\
+freq_baseline = flood.detection_frequency(detections.values())
+tp_ever_mask = np.asarray(ever_detected["baseline"]) & np.asarray(ems_ever) & np.asarray(aoi_mask)
+fp_ever_mask = np.asarray(ever_detected["baseline"]) & ~np.asarray(ems_ever) & np.asarray(aoi_mask)
+print(f"baseline — mean detection frequency, ever-true-positive pixels:  "
+      f"{float(freq_baseline.values[tp_ever_mask].mean()):.2f} of {len(keys)} scenes")
+print(f"baseline — mean detection frequency, ever-false-positive pixels: "
+      f"{float(freq_baseline.values[fp_ever_mask].mean()):.2f} of {len(keys)} scenes")\
+"""))
+
+cells.append(M("""\
+### Hotspots, "ever" style — green where we ever caught a red pixel
+
+Same 3-hotspot device as the before/during/after panels above, but instead of
+rows = time, **rows = technique**, and instead of one scene's mask, each row uses
+that technique's *ever-detected* union. Windows are chosen once (on the baseline
+technique's ever-true-positive pixels) so all four rows show the same ground.
+Column 3 keeps the familiar overlay convention: **green = we ever detected water
+here and EMS says it ever flooded (hit)**, orange = we ever flagged it but EMS
+never did (false alarm), red = EMS says flooded but we never caught it (miss).\
+"""))
+
+cells.append(C("""\
+WIN_EVER = 60
+tp_ever_baseline = np.asarray(ever_detected["baseline"]) & np.asarray(ems_ever)
+windows_ever = flood.top_hotspot_windows(tp_ever_baseline, window=WIN_EVER, n=3)
+
+# background context: sigma0 of the best-scoring single scene from the baseline run
+# (visual anchor only -- the green/orange/red overlay is what carries the "ever" result)
+bg_key = best["scene"]
+bg_db_full = flood.to_db(scenes[bg_key]["da"]).where(aoi_mask)
+techniques_ever = [("baseline", ever_detected["baseline"]), ("despeckle", ever_detected["despeckle"]),
+                    ("slope-mask", ever_detected["slope-mask"]), ("adaptive", ever_detected["adaptive"])]
+
+for wi, (ysl, xsl) in enumerate(windows_ever, 1):
+    print(f"ever-hotspot {wi}/3: ~{WIN_EVER * 0.02:.1f}x{WIN_EVER * 0.02:.1f} km window, "
+          f"{int(tp_ever_baseline[ysl, xsl].sum())} baseline ever-TP px inside")
+    dbz = bg_db_full.isel(y=ysl, x=xsl)
+    yyz = dbz.y.values
+    extent = [float(dbz.x[0]), float(dbz.x[-1]), float(min(yyz[0], yyz[-1])), float(max(yyz[0], yyz[-1]))]
+    imargs = dict(extent=extent, origin="lower" if yyz[0] < yyz[-1] else "upper", aspect="equal")
+    ems_z = np.asarray(ems_ever.isel(y=ysl, x=xsl))
+
+    fig, axes = plt.subplots(len(techniques_ever), 3, figsize=(13, 4 * len(techniques_ever)), layout="constrained")
+    for row, (name, ed) in enumerate(techniques_ever):
+        edz = np.asarray(ed.isel(y=ysl, x=xsl))
+        axes[row, 0].imshow(dbz.values, cmap="gray", vmin=-25, vmax=0, **imargs)
+        axes[row, 1].imshow(np.where(edz, 1.0, np.nan), cmap="Greens", vmin=0, vmax=1.5, **imargs)
+        overlay = np.zeros(edz.shape + (4,))
+        overlay[edz & ems_z] = (0, 0.7, 0, 0.9)      # green: ever-detected AND ever-EMS-flooded
+        overlay[edz & ~ems_z] = (0.95, 0.6, 0, 0.5)  # orange: ever-detected, never EMS-flooded
+        overlay[~edz & ems_z] = (0.85, 0, 0, 0.9)    # red: EMS-flooded, never detected
+        axes[row, 2].imshow(overlay, **imargs)
+        mrow = flood.iou_f1(ed.isel(y=ysl, x=xsl), ems_ever.isel(y=ysl, x=xsl))
+        axes[row, 2].annotate(f"recall {mrow['recall']:.2f}", xy=(0.03, 0.95), xycoords="axes fraction",
+                               fontsize=9, color="white", va="top",
+                               bbox=dict(boxstyle="round,pad=0.2", fc="black", alpha=0.55))
+        axes[row, 0].set_ylabel(name, fontsize=9)
+        for j in range(3):
+            axes[row, j].set_ylim(extent[2], extent[3])
+            axes[row, j].set_xticklabels([])
+            if j: axes[row, j].set_yticklabels([])
+    for j, t in enumerate(["σ⁰ dB (context)", "ever detected (any pass)",
+                            "vs EMS ever-flooded (green hit / orange FP / red miss)"]):
+        axes[0, j].set_title(t, fontsize=9)
+    fig.suptitle(f"Ever-detected hotspot {wi}/3 — technique comparison")
+None\
+"""))
+
+cells.append(M("""\
+## Ever *changed* — isolating the log-ratio "spreading" signal from simple darkness
+
+The `ever_detected` union above mixes two different signals per scene: **log-ratio
+change detection** (`event dB − reference dB`, i.e. "did this pixel get darker
+relative to its own pre-event baseline") wherever a same-track pre-event reference
+exists, and **plain single-image Otsu** (i.e. "is this pixel dark *right now*")
+everywhere else. A pixel can enter that union just for being dark in **one**
+image — a shadow, a wet field, a permanently-dark surface the `perm_water` proxy
+didn't fully catch — without the pixel ever having measurably changed. That's a
+plausible chunk of the large `fpr_ever` above (~0.4–0.5 across techniques).
+
+This section isolates only the log-ratio contribution: did we ever detect this
+pixel actually **changing** — the literal radar signature of water spreading —
+rather than just *being* dark at some point. Coverage caveat: only the scenes with
+a same-track pre-event reference have a log-ratio mask at all (rel131 ASC: Sept 10,
+Sept 16 vs Sept 4; rel22 DESC: Sept 9, Sept 15, Sept 21 vs Sept 3) — the other
+during-event passes (rel168, 95, 102, 29) have no same-track reference yet, so
+they're **excluded** from this measure. That's "unmeasured", not "no change".\
+"""))
+
+cells.append(C("""\
+logratio_keys = [kk for kk in keys if same_track_reference(scenes[kk]["meta"], prods) is not None]
+print(f"{len(logratio_keys)}/{len(keys)} scenes have a same-track pre-event reference "
+      f"(log-ratio / change-detection coverage): {logratio_keys}")
+
+ever_changed = {
+    "baseline":   flood.temporal_union(detections[kk] for kk in logratio_keys),
+    "despeckle":  flood.temporal_union(dets_despeckle[kk] for kk in logratio_keys),
+    "slope-mask": flood.temporal_union(dets_slope[kk] for kk in logratio_keys),
+    "adaptive":   flood.temporal_union(dets_adaptive[kk] for kk in logratio_keys),
+}
+
+change_rows = []
+for name, ed in ever_changed.items():
+    m = flood.iou_f1(ed, ems_ever, valid=ever_valid)
+    change_rows.append({"technique": name, "recall_change": round(m["recall"], 3),
+                         "precision_change": round(m["precision"], 3), "fpr_change": round(m["fpr"], 3),
+                         "iou_change": round(m["iou"], 3), "f1_change": round(m["f1"], 3),
+                         "ever_changed_km2": round(m["pred_area_km2"], 1)})
+change_scores = pd.DataFrame(change_rows).set_index("technique").reindex(
+    ["baseline", "despeckle", "slope-mask", "adaptive"])
+
+# state (ever saw water, any method) vs change (log-ratio only) side by side
+compare = ["recall", "precision", "fpr", "iou"]
+state_vs_change = ever_scores.rename(columns={f"{c}_ever": f"state_{c}" for c in compare})[
+    [f"state_{c}" for c in compare]
+].join(change_scores.rename(columns={f"{c}_change": f"change_{c}" for c in compare})[
+    [f"change_{c}" for c in compare]
+])
+state_vs_change\
+"""))
+
+cells.append(M("""\
+### Tuning the log-ratio threshold — is the FP problem just a threshold-setting problem?
+
+`water_mask_logratio` picks `min(Otsu(ratio), max_threshold_db)` — Otsu's own split
+on each scene's histogram, capped at a fixed physical bound so a weakly-bimodal
+histogram (this AOI's flood is small relative to the scene) can't wander to
+something absurd. That cap defaults to **−3 dB**: any pixel whose backscatter
+dropped 3 dB or more counts as "changed" — loose enough that wind-roughened
+water, wet fields and ordinary speckle can cross it too, not just real flooding.
+Sweep the cap over stricter values and score the resulting `ever_changed` union
+(baseline signal, un-despeckled) against `ems_ever` at each one.\
+"""))
+
+cells.append(C("""\
+def logratio_mask_for(kk, cap):
+    '''baseline (un-despeckled) log-ratio mask for scene kk at a given threshold cap.'''
+    meta = scenes[kk]["meta"]
+    ref = same_track_reference(meta, prods)
+    db = flood.to_db(scenes[kk]["da"]).where(aoi_mask)
+    ref_da = grd.gtc_sigma0(ref, "VV", dem_path,
+                            GTC_DIR / f"{ref.platform}_{ref.relative_orbit:03d}_{ref.start:%Y%m%d}_VV_sigma0.tif",
+                            crop_bbox=BBOX)
+    ref_db = flood.to_db(ref_da).where(aoi_mask)
+    mask, _ = flood.water_mask_logratio(db, ref_db, max_threshold_db=cap)
+    return mask & ~perm_water
+
+cap_sweep = [-3, -4, -5, -6, -7, -8, -9, -10, -12]
+sweep_rows = []
+for cap in cap_sweep:
+    ec = flood.temporal_union(logratio_mask_for(kk, cap) for kk in logratio_keys)
+    m = flood.iou_f1(ec, ems_ever, valid=ever_valid)
+    sweep_rows.append({"cap_dB": cap, "recall": m["recall"], "precision": m["precision"],
+                        "fpr": m["fpr"], "iou": m["iou"], "f1": m["f1"]})
+sweep_df = pd.DataFrame(sweep_rows)
+best_cap = float(sweep_df.loc[sweep_df["iou"].idxmax(), "cap_dB"])
+print(f"best cap by IoU_change: {best_cap:.0f} dB (current default: -3 dB)")
+sweep_df.round(3)\
+"""))
+
+cells.append(C("""\
+fig, ax = plt.subplots(figsize=(8, 4.5), layout="constrained")
+ax.plot(sweep_df["cap_dB"], sweep_df["recall"], "o-", color="#2a78d6", label="recall")
+ax.plot(sweep_df["cap_dB"], sweep_df["fpr"], "o-", color="#eb6834", label="fpr")
+ax.plot(sweep_df["cap_dB"], sweep_df["iou"], "o-", color="#eda100", label="IoU")
+ax.axvline(best_cap, color="gray", ls="--", lw=1, alpha=0.7)
+ax.annotate(f"chosen: {best_cap:.0f} dB", xy=(best_cap, 1.0), xytext=(4, 0),
+            textcoords="offset points", fontsize=8, color="gray")
+ax.set_xlabel("log-ratio threshold cap [dB]  (more negative = stricter)")
+ax.set_ylabel("fraction")
+ax.set_ylim(0, 1.02)
+ax.set_title("Log-ratio threshold sweep — ever-changed vs EMS-ever (baseline signal)")
+ax.legend(fontsize=8, frameon=False)
+ax.spines[["top", "right"]].set_visible(False)
+ax.grid(alpha=0.25)
+ax.set_axisbelow(True)
+None\
+"""))
+
+cells.append(C("""\
+ever_changed_tuned = flood.temporal_union(logratio_mask_for(kk, best_cap) for kk in logratio_keys)
+non_logratio_keys = [kk for kk in keys if kk not in logratio_keys]
+ever_detected_tuned = flood.temporal_union([ever_changed_tuned] + [detections[kk] for kk in non_logratio_keys])
+ever_changed["tuned"] = ever_changed_tuned  # reused by the cumulative hotspot figure below
+
+m_state_tuned = flood.iou_f1(ever_detected_tuned, ems_ever, valid=ever_valid)
+m_change_tuned = flood.iou_f1(ever_changed_tuned, ems_ever, valid=ever_valid)
+state_vs_change.loc["log-ratio (tuned cap)"] = {
+    "state_recall": round(m_state_tuned["recall"], 3), "state_precision": round(m_state_tuned["precision"], 3),
+    "state_fpr": round(m_state_tuned["fpr"], 3), "state_iou": round(m_state_tuned["iou"], 3),
+    "change_recall": round(m_change_tuned["recall"], 3), "change_precision": round(m_change_tuned["precision"], 3),
+    "change_fpr": round(m_change_tuned["fpr"], 3), "change_iou": round(m_change_tuned["iou"], 3),
+}
+state_vs_change\
+"""))
+
+cells.append(M("""\
+### Hotspots: cumulative flood extent over time (tuned log-ratio)
+
+Before/during/after again, but for the ever-changed reference group: each row is
+the **cumulative union of log-ratio detections up to that point in time**, at
+the tuned cap above, chronologically across both tracks (rel22 DESC and rel131
+ASC interleaved) — so the mapped extent visibly grows pass over pass. Same 3
+windows and overlay convention as every hotspot figure above.\
+"""))
+
+cells.append(C("""\
+logratio_keys_sorted = sorted(logratio_keys, key=lambda kk: scenes[kk]["meta"].start)
+running, cum_masks = [], []
+for kk in logratio_keys_sorted:
+    running.append(logratio_mask_for(kk, best_cap))
+    cum_masks.append(flood.temporal_union(running))
+
+stage_idxs = [0, 2, len(logratio_keys_sorted) - 1]  # after pass 1, after pass 3, after all 5 (full)
+stage_rows = [(f"through {scenes[logratio_keys_sorted[i]]['meta'].start:%b %d}\\n"
+               f"({i + 1} change-pass{'es' if i else ''})", cum_masks[i]) for i in stage_idxs]
+
+for wi, (ysl, xsl) in enumerate(windows_ever, 1):
+    dbz = bg_db_full.isel(y=ysl, x=xsl)
+    yyz = dbz.y.values
+    extent = [float(dbz.x[0]), float(dbz.x[-1]), float(min(yyz[0], yyz[-1])), float(max(yyz[0], yyz[-1]))]
+    imargs = dict(extent=extent, origin="lower" if yyz[0] < yyz[-1] else "upper", aspect="equal")
+    ems_z = np.asarray(ems_ever.isel(y=ysl, x=xsl))
+
+    fig, axes = plt.subplots(len(stage_rows), 3, figsize=(13, 4 * len(stage_rows)), layout="constrained")
+    for row, (label, ed) in enumerate(stage_rows):
+        edz = np.asarray(ed.isel(y=ysl, x=xsl))
+        axes[row, 0].imshow(dbz.values, cmap="gray", vmin=-25, vmax=0, **imargs)
+        axes[row, 1].imshow(np.where(edz, 1.0, np.nan), cmap="Greens", vmin=0, vmax=1.5, **imargs)
+        overlay = np.zeros(edz.shape + (4,))
+        overlay[edz & ems_z] = (0, 0.7, 0, 0.9)
+        overlay[edz & ~ems_z] = (0.95, 0.6, 0, 0.5)
+        overlay[~edz & ems_z] = (0.85, 0, 0, 0.9)
+        axes[row, 2].imshow(overlay, **imargs)
+        mrow = flood.iou_f1(ed.isel(y=ysl, x=xsl), ems_ever.isel(y=ysl, x=xsl))
+        axes[row, 2].annotate(f"recall {mrow['recall']:.2f}", xy=(0.03, 0.95), xycoords="axes fraction",
+                               fontsize=9, color="white", va="top",
+                               bbox=dict(boxstyle="round,pad=0.2", fc="black", alpha=0.55))
+        axes[row, 0].set_ylabel(label, fontsize=8)
+        for j in range(3):
+            axes[row, j].set_ylim(extent[2], extent[3])
+            axes[row, j].set_xticklabels([])
+            if j: axes[row, j].set_yticklabels([])
+    for j, t in enumerate(["σ⁰ dB (context)", "cumulative log-ratio detections", "vs EMS ever-flooded"]):
+        axes[0, j].set_title(t, fontsize=9)
+    fig.suptitle(f"Cumulative flood extent {wi}/3 — tuned log-ratio, growing pass over pass")
+None\
+"""))
+
+cells.append(M("""\
+## Results — ever-detected water vs EMS, and ever-changed vs EMS
+
+Two different questions, two different answers, both scored against `ems_ever`
+(EMS's own flood extent, unioned across all four dated products — "flooded here
+at some point," the same standard every number in this section is held to).
+
+**Ever detected as water (state).** Did any single pass ever call this pixel
+water, by whichever method that pass used — log-ratio where a same-track
+reference existed, a plain darkness threshold otherwise. For the baseline
+technique this union covers **85% of everything EMS ever mapped as flooded**
+(`state_recall` 0.845) — but it also flags **47% of the AOI that never flooded
+at all** (`state_fpr` 0.471). Darkness alone is not a reliable flood signal at
+this AOI: shadow, wet fields and ordinary speckle are dark too.
+
+**Ever detected as a change (log-ratio only).** Did this pixel actually get
+darker relative to its own pre-event baseline, on one of the 5 scenes that have
+one. Already an improvement at the untouched −3 dB default: `change_fpr` 0.361
+against `change_recall` 0.643 — a smaller false-alarm footprint than state's,
+even before tuning. Moving to the IoU-optimal −6 dB cap pushes the same trade
+further: `change_fpr` down to **0.118**, `IoU` up from 0.057 to **0.065** — but
+`change_recall` drops to **0.282**. At this AOI's flood size, log-ratio change
+detection, even tuned, recovers well under a third of the labelled flood once
+false alarms are pushed down this hard — a real, usable trade-off, not a
+solved problem.\
+"""))
+
+cells.append(C("""\
+state_vs_change.to_csv(ROOT / "docs/flood_state_vs_change_comparison.csv")
+print("wrote", ROOT / "docs/flood_state_vs_change_comparison.csv")
+state_vs_change\
+"""))
+
+cells.append(C("""\
+STATE_COLOR, CHANGE_COLOR = "#2a78d6", "#eb6834"   # categorical slots 1/2, validated last session
+techniques = list(state_vs_change.index)
+xpos = np.arange(len(techniques))
+w = 0.35
+
+fig, (axL, axR) = plt.subplots(1, 2, figsize=(13, 5.5), layout="constrained")
+for ax, metric, title in [(axL, "recall", "recall_ever — share of EMS-ever-flooded area we ever caught"),
+                           (axR, "fpr", "fpr_ever — share of never-flooded AOI we ever mis-flagged")]:
+    b1 = ax.bar(xpos - w / 2, state_vs_change[f"state_{metric}"], width=w, color=STATE_COLOR,
+                label="state (ever saw water, any method)")
+    b2 = ax.bar(xpos + w / 2, state_vs_change[f"change_{metric}"], width=w, color=CHANGE_COLOR,
+                label="change (log-ratio only)")
+    ax.bar_label(b1, fmt="%.2f", fontsize=7, padding=1)
+    ax.bar_label(b2, fmt="%.2f", fontsize=7, padding=1)
+    ax.set_xticks(xpos, techniques)
+    plt.setp(ax.get_xticklabels(), rotation=15, ha="right")
+    ax.set_ylim(0, 1.08)
+    ax.set_title(title, fontsize=10)
+    ax.spines[["top", "right"]].set_visible(False)
+    ax.grid(axis="y", alpha=0.25)
+    ax.set_axisbelow(True)
+axL.set_ylabel("fraction")
+axL.legend(loc="upper center", bbox_to_anchor=(1.05, -0.15), ncol=2, fontsize=8, frameon=False)
+fig.suptitle("Ever saw water (state) vs ever changed (log-ratio) — recall and false-positive rate, all techniques")
+None\
+"""))
+
+cells.append(M("""\
+**Bottom line.** Being radar-dark is not the same as being flood, and being a
+detected *change* is closer but still incomplete on its own — even at the
+IoU-optimal threshold, log-ratio change detection trades away most of its
+recall to bring false alarms down to a still-substantial 12% of the AOI.
+Despeckling makes both `state` and `change` numbers worse, not better, across
+every technique row above — most likely because this AOI's labelled flood is a
+narrow river-corridor feature that a spatial median filter erases along with
+the noise. The false positives are not simple one-off speckle either: a pixel
+ever flagged as a false positive by the baseline technique was flagged on
+**23% of passes on average, against 24% for true positives** — almost
+indistinguishable, meaning most of the FP footprint is a standing non-flood
+dark surface (shadow, wet ground, low-lying terrain), not noise that more
+passes would average away. The untuned baseline and the tuned log-ratio cap
+mark two ends of a genuine precision/recall trade-off in this data; closing the
+gap further would need the false-positive *surfaces* themselves identified and
+masked, not just a better global threshold.\
+"""))
 
 nb.cells = cells
 nb.metadata["kernelspec"] = {"name": "python3", "display_name": "Python 3", "language": "python"}
-out = "notebooks/flood_timeseries.ipynb"
+out = "notebooks/nb_flood.ipynb"
 nbf.write(nb, out)
 print("wrote", out)

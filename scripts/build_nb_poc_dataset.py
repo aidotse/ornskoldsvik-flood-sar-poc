@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Author notebooks/poc_dataset.ipynb — open the POC store, batch it, plot it."""
+"""Author notebooks/nb_poc_dataset.ipynb — open the POC store, batch it, plot it."""
 
 import nbformat as nbf
 
@@ -10,14 +10,15 @@ cells = []
 cells.append(M("""\
 # The POC dataset
 
-One coherent zarr-v3 store (`data/zarr/poc.zarr`, ~0.55 GB) holding everything the
+One coherent zarr-v3 store (`data/zarr/poc.zarr`, ~1.0 GB) holding everything the
 pre-study needs in one place, for one event:
 
 | group | content |
 |---|---|
 | `sigma0/track_*` | geocoded VV σ⁰ stacks per relative orbit (time,y,x), 20 m UTM33 |
-| `labels/` | EMS flood/AOI rasters on the σ⁰ grid + **raw-geometry label windows** |
-| `raw/00809C_vv/chunk_*` | decoded I/Q for the 10 AOI echo chunks of the rel-22 pass + per-line headers |
+| `labels/` | EMS flood/AOI rasters on the σ⁰ grid + **raw-geometry label windows**, one set per anchor pass |
+| `raw/00809C_vv/chunk_*` | decoded I/Q + per-line headers, 10 AOI echo chunks, S1C rel-22 Sept 9 |
+| `raw/0796C3_vv/chunk_*` | same, 8 chunks, S1A rel-131 Sept 10 — the FEP label-source pass |
 | `tables/smhi` | precipitation (2 stations) + Moälven discharge |
 
 Built by `scripts/build_zarr_store.py`; codec choices are the measured winners from
@@ -148,13 +149,16 @@ cells.append(M("""\
 2. Chip-oriented chunking serves ML reads directly (xbatcher above); raw chunks are
    line-block-oriented for signal-domain consumers.
 3. The weak-label pathway (map polygons → raw windows) is concrete, stored, and
-   backed by the measured 0.66 km geolocation error bars (`docs/labels.md`).
-4. What's missing, deliberately: the two zero-offset anchor passes (in the pending
-   download manifest) — the store schema already has their slots (per-track sigma0
-   time dimension, per-datatake raw groups).\
+   backed by measured 0.64–0.66 km geolocation error bars
+   (`docs/label_attach_errorbars.csv`).
+4. **Both raw anchor passes are in the store**, one per pass direction: S1C rel-22
+   Sept 9 (DESC) and S1A rel-131 Sept 10 (ASC, the FEP label source — zero
+   label-to-acquisition offset). Each has its own raw group and its own set of
+   raw-geometry label windows, so the weak-label figure above reproduces on either
+   geometry.\
 """))
 
 nb.cells = cells
 nb.metadata["kernelspec"] = {"name": "python3", "display_name": "Python 3", "language": "python"}
-nbf.write(nb, "notebooks/poc_dataset.ipynb")
-print("wrote notebooks/poc_dataset.ipynb")
+nbf.write(nb, "notebooks/nb_poc_dataset.ipynb")
+print("wrote notebooks/nb_poc_dataset.ipynb")
