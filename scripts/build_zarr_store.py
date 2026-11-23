@@ -111,8 +111,11 @@ def _add_raw_one(root: zarr.Group, safe: Path, grd_glob: str, desc: str) -> None
 
     # AOI azimuth-time window from the same-datatake GRD's GCP grid (the honest way:
     # sub-satellite lat/lon alone is ~1° lat off because the swath looks ~450 km sideways)
-    grd_safe = glob.glob(str(ROOT / "data/extracted" / grd_glob))[0]
-    gcp = xr.open_dataset(grd_safe, engine="sentinel-1", group="IW/VV/gcp")
+    grd_hits = glob.glob(str(ROOT / "data/extracted" / grd_glob))
+    if not grd_hits:
+        raise FileNotFoundError(f"{grd_glob} not extracted under {ROOT / 'data/extracted'} "
+                                "(grd.gtc_sigma0 / scripts/gtc_all.py extract the GRD SAFEs there)")
+    gcp = xr.open_dataset(grd_hits[0], engine="sentinel-1", group="IW/VV/gcp")
     in_aoi = ((gcp.latitude >= 63.20) & (gcp.latitude <= 63.61)
               & (gcp.longitude >= 17.6) & (gcp.longitude <= 18.9))
     az = gcp.azimuth_time.where(in_aoi.any("slant_range_time")).dropna("azimuth_time")

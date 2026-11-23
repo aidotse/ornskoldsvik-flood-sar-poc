@@ -53,14 +53,22 @@ def water_mask_logratio(
 def despeckle(db: xr.DataArray, size: int = 3) -> xr.DataArray:
     """Median-filter speckle reduction on a dB image, applied before thresholding.
 
-    NaNs (outside-AOI / nodata) pass through untouched by filtering just the finite
-    region and re-inserting NaNs, so the AOI boundary doesn't bleed into the filter.
+    NaNs (outside-AOI / nodata) are temporarily filled with their nearest finite
+    neighbour, so the fill never drags the median of AOI-edge pixels (the boundary
+    behaves like scipy's mode="nearest"; a 0 dB fill brightened the AOI rim and erased
+    convex corners), and are re-inserted afterwards.
     """
-    from scipy.ndimage import median_filter
+    from scipy.ndimage import distance_transform_edt, median_filter
 
     v = db.values
     finite = np.isfinite(v)
-    filtered = median_filter(np.where(finite, v, 0.0), size=size)
+    if not finite.any():
+        return xr.DataArray(v.copy(), coords=db.coords, dims=db.dims)
+    filled = v
+    if not finite.all():
+        nearest = distance_transform_edt(~finite, return_distances=False, return_indices=True)
+        filled = v[tuple(nearest)]
+    filtered = median_filter(filled, size=size)
     filtered = np.where(finite, filtered, np.nan)
     return xr.DataArray(filtered, coords=db.coords, dims=db.dims)
 
@@ -82,21 +90,26 @@ def water_mask_adaptive(signal: xr.DataArray, block: int = 100, k: float = 2.0) 
     angle), so a single global number either misses subtly-darker regions or
     over-triggers in naturally-darker ones.
 
-    Known simplification: local mean/std are computed with NaN (outside-AOI) pixels
-    zero-filled, which biases results right at the AOI edge. Fine for comparing
-    techniques here; not precise enough for production use at the boundary.
+    Local mean/std use only the finite pixels of each window (box sums normalised by the
+    count of finite pixels), so NaN (outside-AOI) pixels never enter the statistics. A
+    zero fill would bias every pixel here, not just the edge: the 100-px window is wider
+    than the ~60-px AOI corridor. The returned threshold is the mean of the thresholds
+    actually applied to the finite pixels.
     """
     from scipy.ndimage import uniform_filter
 
     v = signal.values
     finite = np.isfinite(v)
-    filled = np.where(finite, v, 0.0)
-    local_mean = uniform_filter(filled, size=block)
-    local_mean_sq = uniform_filter(filled ** 2, size=block)
-    local_std = np.sqrt(np.clip(local_mean_sq - local_mean ** 2, 0, None))
-    local_thr = local_mean - k * local_std
+    filled = np.where(finite, v, 0.0).astype(np.float64)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        count = uniform_filter(finite.astype(np.float64), size=block)
+        local_mean = uniform_filter(filled, size=block) / count
+        local_mean_sq = uniform_filter(filled**2, size=block) / count
+        local_std = np.sqrt(np.clip(local_mean_sq - local_mean**2, 0, None))
+        local_thr = local_mean - k * local_std
     mask = (v < local_thr) & finite
-    return xr.DataArray(mask, coords=signal.coords, dims=signal.dims), float(np.nanmean(local_thr))
+    thr = float(local_thr[finite].mean()) if finite.any() else float("nan")
+    return xr.DataArray(mask, coords=signal.coords, dims=signal.dims), thr
 
 
 def rasterize_labels(gdf: gpd.GeoDataFrame, template: xr.DataArray) -> xr.DataArray:

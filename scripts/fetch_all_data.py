@@ -24,6 +24,7 @@ one SLC that notebook 03 compares against are handled here.
 from __future__ import annotations
 
 import argparse
+import shutil
 import sys
 import zipfile
 from pathlib import Path
@@ -65,8 +66,29 @@ def _get(url: str, dest: Path, desc: str) -> None:
     tmp.rename(dest)
 
 
+def _extract_atomic(zp: Path, target: Path, member_root: str | None = None) -> None:
+    """Unzip zp so that `target` only appears once the extraction has completed.
+
+    Extracts into a hidden sibling `.<name>.partial` directory and renames it into place,
+    so an interrupted unzip (Ctrl-C, full disk, bad zip) is redone on the next run instead
+    of being mistaken for a finished one. member_root: the zip's top-level folder to move
+    into place (SAFE zips); None for flat zips whose contents become `target` itself.
+    """
+    tmp = target.with_name(f".{target.name}.partial")
+    if tmp.exists():
+        shutil.rmtree(tmp)
+    tmp.mkdir(parents=True)
+    with zipfile.ZipFile(zp) as z:
+        z.extractall(tmp)
+    if member_root is None:
+        tmp.rename(target)
+    else:
+        (tmp / member_root).rename(target)
+        shutil.rmtree(tmp)
+
+
 def fetch_dem(cfg: dict, do: bool) -> list[str]:
-    """GLO-30 tiles from public S3. grd.prepare_dem() merges them at notebook time."""
+    """GLO-30 tiles from public S3. grd.prepare_dem() merges them (scripts/gtc_all.py does it first)."""
     out_dir = ROOT / "data/dem"
     missing = [t for t in cfg["dem"]["tiles"] if not (out_dir / f"{t}.tif").exists()]
     for tile in missing if do else []:
@@ -110,9 +132,7 @@ def fetch_ems(cfg: dict, do: bool) -> list[str]:
         target = ROOT / "data/ems" / zp.stem
         if target.is_dir():
             continue
-        target.mkdir(parents=True, exist_ok=True)
-        with zipfile.ZipFile(zp) as z:
-            z.extractall(target)
+        _extract_atomic(zp, target)
         print(f"  extracted {zp.stem}/")
     return [f"EMS {w}" for w in missing]
 
@@ -154,9 +174,7 @@ def extract_safes(cfg: dict, do: bool) -> list[str]:
             if not (dest_dir / f"{zp.stem}.SAFE").exists():
                 todo.append((zp, dest_dir))
     for zp, dest_dir in todo if do else []:
-        dest_dir.mkdir(parents=True, exist_ok=True)
-        with zipfile.ZipFile(zp) as z:
-            z.extractall(dest_dir)
+        _extract_atomic(zp, dest_dir / f"{zp.stem}.SAFE", member_root=f"{zp.stem}.SAFE")
         print(f"  extracted {zp.stem}.SAFE -> {dest_dir.relative_to(ROOT)}/")
     return [f"extract {zp.stem}.SAFE" for zp, _d in todo]
 

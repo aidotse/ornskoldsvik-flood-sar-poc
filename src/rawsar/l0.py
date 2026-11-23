@@ -102,7 +102,10 @@ def azimuth_focus_patch(
     f_az = np.fft.fftfreq(n_az, d=1.0 / prf)
     ka = 2 * v_eff**2 / (WAVELENGTH * slant_range_m)  # azimuth FM rate per gate (Hz/s)
     rc_f = np.fft.fft(rc, axis=0)
-    h = np.exp(1j * np.pi * (f_az[:, None] ** 2) / ka[None, :])
+    # azimuth history exp(-j4πR(η)/λ) ≈ exp(-jπ·Ka·η²) has spectrum ∝ exp(+jπf²/Ka) (the
+    # convention range_compress's conj(replica) filter already relies on), so the matched
+    # filter is its conjugate; exp(+jπf²/Ka) would double the azimuth chirp instead
+    h = np.exp(-1j * np.pi * (f_az[:, None] ** 2) / ka[None, :])
     return np.fft.ifft(rc_f * h, axis=0).astype(np.complex64)
 
 

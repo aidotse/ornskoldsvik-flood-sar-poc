@@ -13,6 +13,9 @@ dependencies = [
     "pyproj",
     "pystac-client",
     "sarsen",
+    # 0.9.7 renamed the GRD gcp range dim slant_range_time -> ground_range, which the GCP
+    # readers in grd.py, l0.py, build_zarr_store.py and label_attach_errorbars.py rely on
+    "xarray-sentinel<0.9.7",
     "sentinel1decoder",
     "xbatcher",
     "matplotlib",

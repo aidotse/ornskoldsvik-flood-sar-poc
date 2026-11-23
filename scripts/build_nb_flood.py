@@ -487,6 +487,7 @@ def evaluate_and_plot(name, detect):
     for kk in keys:
         meta = scenes[kk]["meta"]
         mask, thr, note = detect(kk)
+        mask = mask & ~perm_water   # as in the baseline: score flood, not rivers/lakes (truth drops it too)
         dets[kk] = mask
         db_kk = flood.to_db(scenes[kk]["da"]).where(aoi_mask)
         valid = np.isfinite(db_kk) & aoi_mask
@@ -681,6 +682,7 @@ summary = summary.reindex(["baseline", "despeckle", "slope-mask", "adaptive"])
 print(summary)
 
 out_csv = ROOT / "docs/flood_method_comparison.csv"
+out_csv.parent.mkdir(parents=True, exist_ok=True)   # docs/ is gitignored, absent in a fresh clone
 all_scores.to_csv(out_csv, index=False)
 print("wrote", out_csv)
 
@@ -1050,6 +1052,7 @@ solved problem.\
 """))
 
 cells.append(C("""\
+(ROOT / "docs").mkdir(parents=True, exist_ok=True)
 state_vs_change.to_csv(ROOT / "docs/flood_state_vs_change_comparison.csv")
 print("wrote", ROOT / "docs/flood_state_vs_change_comparison.csv")
 state_vs_change\

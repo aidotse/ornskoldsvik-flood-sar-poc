@@ -89,6 +89,7 @@ def main() -> None:
         all_rows += measure_datatake(store, raw, group, raw_glob, grd_glob)
 
     df = pd.DataFrame(all_rows)
+    (ROOT / "docs").mkdir(parents=True, exist_ok=True)  # docs/ is gitignored, absent in a fresh clone
     df.to_csv(ROOT / "docs/label_attach_errorbars.csv", index=False)
     for g, sub in df.groupby("datatake"):
         print(f"\n{g}: median |err| {sub.err_km.median():.2f} km "
@@ -106,8 +107,11 @@ def measure_datatake(store, raw, group: str, raw_glob: str, grd_glob: str) -> li
     P = eph[[f"{a}-axis position ECEF" for a in "XYZ"]].to_numpy(float)
     V = eph[[f"{a}-axis velocity ECEF" for a in "XYZ"]].to_numpy(float)
 
-    grd_safe = glob.glob(str(ROOT / "data/extracted" / grd_glob))[0]
-    gcp = xr.open_dataset(grd_safe, engine="sentinel-1", group="IW/VV/gcp")
+    grd_hits = glob.glob(str(ROOT / "data/extracted" / grd_glob))
+    if not grd_hits:
+        raise FileNotFoundError(f"{grd_glob} not extracted under {ROOT / 'data/extracted'} "
+                                "(grd.gtc_sigma0 / scripts/gtc_all.py extract the GRD SAFEs there)")
+    gcp = xr.open_dataset(grd_hits[0], engine="sentinel-1", group="IW/VV/gcp")
 
     rows = []
     for name in sorted(raw.group_keys()):

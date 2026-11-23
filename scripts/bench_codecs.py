@@ -92,6 +92,7 @@ def main() -> None:
     df = pd.DataFrame(rows)[["codec", "data", "ratio", "enc_MBps", "dec_MBps"]]
     df.attrs["int16_quantization_snr_db"] = snr_db
     out = ROOT / "docs/codec_benchmarks.csv"
+    out.parent.mkdir(parents=True, exist_ok=True)  # docs/ is gitignored, absent in a fresh clone
     df.to_csv(out, index=False)
     print(f"\nint16 quantization SNR: {snr_db:.1f} dB (scale from 99.99th pct)")
     print("wrote", out)

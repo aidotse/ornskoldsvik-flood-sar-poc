@@ -50,23 +50,26 @@ cells.append(C("""\
 ds = xr.open_zarr(STORE, group="sigma0/track_022")
 labels = root["labels/ems_flood_union"][:]
 
+# track_022 stacks every rel-22 pass (Sept 3/9/15/21, time-sorted): select the during-event one by date
+CHIP_DATE = pd.Timestamp("2025-09-09")
 da = ds.sigma0_vv
 lab_da = xr.DataArray(labels, dims=("y", "x"), coords={"y": da.y, "x": da.x})
-stacked = xr.Dataset({"sigma0": da.isel(time=0), "flood": lab_da})
+stacked = xr.Dataset({"sigma0": da.sel(time=CHIP_DATE), "flood": lab_da})
 gen = xbatcher.BatchGenerator(stacked, input_dims={"x": 256, "y": 256})
 batches = list(gen)
 positives = [b for b in batches if float(b.flood.sum()) > 0]
 print(f"{len(batches)} chips of 256², {len(positives)} contain flood labels")
 
+ORIGIN = "lower" if float(da.y[0]) < float(da.y[-1]) else "upper"   # north up (sarsen writes south-to-north)
 fig, axes = plt.subplots(2, 4, figsize=(14, 7), layout="constrained")
 for ax, b in zip(np.ravel(axes), positives[:8]):
     db = 10 * np.log10(b.sigma0.where(b.sigma0 > 0))
-    ax.imshow(db, cmap="gray", vmin=-25, vmax=0)
+    ax.imshow(db, cmap="gray", vmin=-25, vmax=0, origin=ORIGIN)
     m = np.ma.masked_where(~b.flood.values.astype(bool), b.flood.values)
-    ax.imshow(m, cmap="autumn", alpha=0.8, vmin=0, vmax=1)
+    ax.imshow(m, cmap="autumn", alpha=0.8, vmin=0, vmax=1, origin=ORIGIN)
     ax.set_title(f"flood px: {int(b.flood.sum())}", fontsize=9)
     ax.axis("off")
-fig.suptitle("xbatcher chips: σ⁰ (Sept 9, rel 22) + EMS flood-union label overlay")
+fig.suptitle(f"xbatcher chips: σ⁰ ({CHIP_DATE:%b %d}, rel 22) + EMS flood-union label overlay")
 None\
 """))
 

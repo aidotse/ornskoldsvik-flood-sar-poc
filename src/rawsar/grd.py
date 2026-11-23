@@ -7,6 +7,7 @@ All products are read directly from their zips via xarray-sentinel
 from __future__ import annotations
 
 import re
+import shutil
 import zipfile
 from dataclasses import dataclass
 from datetime import datetime
@@ -15,8 +16,13 @@ from pathlib import Path
 import numpy as np
 import rioxarray  # noqa: F401  (registers .rio accessor)
 import xarray as xr
+from rasterio.enums import Resampling
 from sarsen import apps
 from sarsen.sentinel1 import Sentinel1SarProduct
+
+# Anchored at the repository, not the process cwd: notebooks run from notebooks/ and
+# must extract to the same data/extracted that build_zarr_store/label_attach_errorbars read.
+DEFAULT_EXTRACT_DIR = Path(__file__).resolve().parents[2] / "data" / "extracted"
 
 NAME_RE = re.compile(
     r"(?P<platform>S1[ABC])_IW_(?P<kind>RAW__0|SLC__1|GRDH_1|OCN__2)S(?P<pols>\w{2})_"
@@ -95,24 +101,34 @@ class Sigma0Product(Sentinel1SarProduct):
         super().__init__(*args, **kwargs)
         self.crop_bbox = crop_bbox
 
-    def _crop_slices(self) -> tuple[slice, slice]:
-        """(azimuth line, range pixel) index slices covering crop_bbox + 1 GCP cell margin."""
+    def _crop_slices(self, buffer_deg: float = 0.01) -> tuple[slice, slice]:
+        """(azimuth line, range pixel) index slices covering every GCP cell that overlaps crop_bbox.
+
+        A cell is kept when the lon/lat bounding box of its four GCP corners overlaps the
+        bbox (padded by ``buffer_deg`` for terrain displacement). Keeping only rows/columns
+        that contain a GCP inside the bbox (+1 cell) clipped bbox corners whenever the
+        coarse, rotated GCP lattice had no point near them, leaving NaN in the GTC there.
+        The cell selection always contains that old "GCPs inside + 1 cell" window.
+        """
         assert self.crop_bbox is not None
         w, s, e, n = self.crop_bbox
+        w, s, e, n = w - buffer_deg, s - buffer_deg, e + buffer_deg, n + buffer_deg
         gcp = self.gcp
-        inside = (
-            (gcp.longitude >= w) & (gcp.longitude <= e) & (gcp.latitude >= s) & (gcp.latitude <= n)
-        )
-        az_any = inside.any("slant_range_time").values
-        rg_any = inside.any("azimuth_time").values
-        if not az_any.any() or not rg_any.any():
+        lat = gcp.latitude.values  # (azimuth GCP row, range GCP column)
+        lon = gcp.longitude.values
+
+        def cell_corners(a: np.ndarray) -> np.ndarray:
+            return np.stack([a[:-1, :-1], a[1:, :-1], a[:-1, 1:], a[1:, 1:]])
+
+        lat_c, lon_c = cell_corners(lat), cell_corners(lon)
+        hit = (lon_c.max(0) >= w) & (lon_c.min(0) <= e) & (lat_c.max(0) >= s) & (lat_c.min(0) <= n)
+        if not hit.any():
             raise ValueError(f"AOI {self.crop_bbox} does not intersect product GCP grid")
-        az_idx = np.where(az_any)[0]
-        rg_idx = np.where(rg_any)[0]
+        rows, cols = np.nonzero(hit)
         lines = gcp.line.values
         pixels = gcp.pixel.values
-        i0, i1 = max(az_idx[0] - 1, 0), min(az_idx[-1] + 1, len(lines) - 1)
-        j0, j1 = max(rg_idx[0] - 1, 0), min(rg_idx[-1] + 1, len(pixels) - 1)
+        i0, i1 = rows.min(), rows.max() + 1  # cell i spans GCP rows i..i+1
+        j0, j1 = cols.min(), cols.max() + 1
         return slice(int(lines[i0]), int(lines[i1]) + 1), slice(int(pixels[j0]), int(pixels[j1]) + 1)
 
     def beta_nought(self, persist: bool = False) -> xr.DataArray:  # noqa: D102
@@ -136,7 +152,11 @@ def prepare_dem(
     resolution: float = 20.0,
     buffer_deg: float = 0.03,
 ) -> Path:
-    """Merge GLO-30 tiles, clip to AOI bbox (+buffer), reproject to a UTM grid."""
+    """Merge GLO-30 tiles, clip to AOI bbox (+buffer), reproject to a UTM grid.
+
+    Bilinear resampling: GLO-30 posts are ~31 m x 28 m at 63°N, and nearest-neighbour onto
+    the 20 m grid duplicates rows/columns, terracing the DEM (striped slope masks).
+    """
     from rioxarray.merge import merge_arrays
 
     if out_path.exists():
@@ -145,7 +165,7 @@ def prepare_dem(
     dem = merge_arrays(tiles) if len(tiles) > 1 else tiles[0]
     w, s, e, n = bbox
     dem = dem.rio.clip_box(w - buffer_deg, s - buffer_deg, e + buffer_deg, n + buffer_deg)
-    dem = dem.rio.reproject(crs, resolution=resolution)
+    dem = dem.rio.reproject(crs, resolution=resolution, resampling=Resampling.bilinear)
     dem = dem.where(dem > -1000, 0.0).astype("float32")  # nodata/sea -> 0 m
     dem.rio.write_nodata(np.nan, inplace=True)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -154,12 +174,21 @@ def prepare_dem(
 
 
 def extract_safe(product: S1Zip, extract_dir: Path) -> Path:
-    """Unzip a SAFE next to its siblings (cached); sarsen's rasterio reads need real files."""
+    """Unzip a SAFE next to its siblings (cached); sarsen's rasterio reads need real files.
+
+    The zip is unpacked into a hidden ``.<name>.partial`` directory that is renamed into
+    place only when complete, so an interrupted extraction is redone instead of reused.
+    """
     safe = extract_dir / product.safe_name
     if not safe.exists():
-        extract_dir.mkdir(parents=True, exist_ok=True)
+        tmp = extract_dir / f".{product.safe_name}.partial"
+        if tmp.exists():
+            shutil.rmtree(tmp)
+        tmp.mkdir(parents=True)
         with zipfile.ZipFile(product.path) as z:
-            z.extractall(extract_dir)
+            z.extractall(tmp)
+        (tmp / product.safe_name).rename(safe)
+        shutil.rmtree(tmp)
     return safe
 
 
@@ -169,22 +198,30 @@ def gtc_sigma0(
     dem_path: Path,
     out_tif: Path,
     chunks: int = 1024,
-    extract_dir: Path = Path("data/extracted"),
+    extract_dir: Path = DEFAULT_EXTRACT_DIR,
     crop_bbox: tuple[float, float, float, float] | None = None,
 ) -> xr.DataArray:
-    """Geocoded (GTC) σ⁰ for one polarisation onto the DEM grid. Cached by out_tif."""
+    """Geocoded (GTC) σ⁰ for one polarisation onto the DEM grid. Cached by out_tif.
+
+    sarsen writes to ``<out_tif stem>.partial.tif``, renamed onto out_tif only after the
+    terrain correction finished, so an interrupted run never leaves a file that a later
+    call would serve as a cache hit. Hit or miss, the file-backed raster is returned:
+    sarsen's own return value is an unpersisted dask graph that would redo the whole
+    terrain correction on every access.
+    """
     if out_tif.exists() and out_tif.stat().st_size == 0:
         out_tif.unlink()  # leftover from an interrupted run
-    if out_tif.exists():
-        da = rioxarray.open_rasterio(out_tif).squeeze("band", drop=True)
-        return da
-    safe = extract_safe(product, extract_dir)
-    sar = Sigma0Product(str(safe), measurement_group=f"IW/{pol.upper()}", crop_bbox=crop_bbox)
-    out_tif.parent.mkdir(parents=True, exist_ok=True)
-    da = apps.terrain_correction(
-        sar,
-        dem_urlpath=str(dem_path),
-        output_urlpath=str(out_tif),
-        chunks=chunks,
-    )
-    return da
+    if not out_tif.exists():
+        safe = extract_safe(product, extract_dir)
+        sar = Sigma0Product(str(safe), measurement_group=f"IW/{pol.upper()}", crop_bbox=crop_bbox)
+        out_tif.parent.mkdir(parents=True, exist_ok=True)
+        partial = out_tif.with_name(out_tif.stem + ".partial.tif")
+        partial.unlink(missing_ok=True)
+        apps.terrain_correction(
+            sar,
+            dem_urlpath=str(dem_path),
+            output_urlpath=str(partial),
+            chunks=chunks,
+        )
+        partial.replace(out_tif)
+    return rioxarray.open_rasterio(out_tif).squeeze("band", drop=True)
